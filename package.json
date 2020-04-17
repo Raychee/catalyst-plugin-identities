@@ -1,0 +1,23 @@
+{
+  "name": "@raychee/catalyst-plugin-identities",
+  "version": "0.0.1",
+  "description": "identities plugin for catalyst",
+  "main": "index.js",
+  "scripts": {
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Raychee/catalyst-plugin-identities.git"
+  },
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/Raychee/catalyst-plugin-identities/issues"
+  },
+  "homepage": "https://github.com/Raychee/catalyst-plugin-identities#readme",
+  "dependencies": {
+    "@raychee/utils": "^0.1.19",
+    "lodash": "^4.17.15",
+    "uuid": "^7.0.3"
+  }
+}
