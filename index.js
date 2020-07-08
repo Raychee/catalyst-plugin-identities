@@ -30,11 +30,11 @@ class Identities {
                     '2. there is a valid identities options entry under document field \'data.', this.name, '\''
                 );
             }
-            this._load(store);
+            this._load(store, {unlock: true});
         }
     }
 
-    _load({options = {}, identities = {}} = {}) {
+    _load({options = {}, identities = {}} = {}, {unlock = false} = {}) {
         const minIntervalBetweenStoreUpdate = get(this.options, 'minIntervalBetweenStoreUpdate');
         // {
         //     createIdentityFn,
@@ -49,7 +49,9 @@ class Identities {
             );
         }
         for (const identity of this._iterIdentities(identities)) {
-            delete identity.locked;
+            if (unlock) {
+                identity.locked = null;
+            }
             this._add(identity);
         }
     }
@@ -127,7 +129,7 @@ class Identities {
         if (!identity) return;
         if (identity.locked) {
             this._info(logger, id, ' is unlocked.');
-            identity.locked = undefined;
+            identity.locked = null;
             this.touch(logger, id);
         }
     }
