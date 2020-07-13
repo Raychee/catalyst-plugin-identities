@@ -14,6 +14,9 @@ class Identities {
         if (!stored) {
             this._load({options});
         }
+        
+        this._waitForAvailable = [];
+        this._waitForAvailableTimeout = undefined;
 
         this._init = dedup(Identities.prototype._init.bind(this));
         this._get = dedup(Identities.prototype._get.bind(this), {key: null});
@@ -54,6 +57,18 @@ class Identities {
             }
             this._add(identity);
         }
+        this._clearWaitForAvailable();
+    }
+
+    _clearWaitForAvailable() {
+        if (this._waitForAvailableTimeout) {
+            clearTimeout(this._waitForAvailableTimeout);
+            this._waitForAvailableTimeout = undefined;
+        }
+        for (const {resolve} of this._waitForAvailable) {
+            resolve();
+        }
+        this._waitForAvailable = [];
     }
 
     _add({id = uuid4(), data, deprecated = 0, lastTimeUsed = new Date(0), locked = false}) {
@@ -62,7 +77,7 @@ class Identities {
         return {id, ...identity};
     }
 
-    async get(logger, {ifAbsent = undefined, waitForStore = false, lock = false} = {}) {
+    async get(logger, {ifAbsent = undefined, lock = false} = {}) {
         logger = logger || this.logger;
         while (true) {
             let identity = undefined;
@@ -90,11 +105,11 @@ class Identities {
                 }
                 return identity;
             }
-            await this._get(logger, ifAbsent || this.options.createIdentityFn, waitForStore);
+            await this._get(logger, ifAbsent || this.options.createIdentityFn);
         }
     }
 
-    async _get(logger, createIdentityFn, waitForStore) {
+    async _get(logger, createIdentityFn) {
         let identity = undefined;
         if (createIdentityFn) {
             identity = await createIdentityFn();
@@ -102,18 +117,28 @@ class Identities {
                 identity = this._add(identity);
             }
         }
-        if (!identity && waitForStore && this.stored) {
-            const store = await this.logger.pull({
-                waitUntil: s => {
-                    const identities = get(s, [this.name, 'identities'], {});
-                    for (const identity of this._iterIdentities(identities)) {
-                        if (this._isAvailable(identity)) return true;
+        if (!identity) {
+            if (!this._waitForAvailableTimeout) {
+                let expire = undefined;
+                for (const identity of this._iterIdentities()) {
+                    const expires = [];
+                    if (identity.locked) {
+                        expires.push(identity.locked.getTime() + this.options.lockExpire * 1000);
                     }
-                    return false;
-                },
-                message: `waiting for a valid identity in store field ${this.name}`
+                    if (identity.lastTimeUsed) {
+                        expires.push(identity.lastTimeUsed.getTime() + this.options.minIntervalBetweenUse * 1000);
+                    }
+                    const expire_ = Math.min(...expires);
+                    expire = expire ? Math.min(expire, expire_) : expire_;
+                }
+                const now = Date.now();
+                if (expire && expire > now) {
+                    this._waitForAvailableTimeout = setTimeout(() => this._clearWaitForAvailable(), expire - now);
+                }
+            }
+            return new Promise((resolve, reject) => {
+                this._waitForAvailable.push({resolve, reject});
             });
-            this._load(store[this.name]);
         }
     }
 
@@ -131,6 +156,7 @@ class Identities {
             this._info(logger, id, ' is unlocked.');
             identity.locked = null;
             this.touch(logger, id);
+            this._clearWaitForAvailable();
         }
     }
 
