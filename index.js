@@ -11,9 +11,6 @@ class Identities {
         this.name = name;
         this.stored = stored;
         this.identities = {};
-        if (!stored) {
-            this._load({options});
-        }
         
         this._waitForAvailable = [];
         this._waitForAvailableTimeout = undefined;
@@ -21,6 +18,10 @@ class Identities {
         this._init = dedup(Identities.prototype._init.bind(this));
         this._get = dedup(Identities.prototype._get.bind(this), {key: null});
         this.__syncStore = dedup(Identities.prototype._syncStoreForce.bind(this));
+
+        if (!stored) {
+            this._load({options});
+        }
     }
 
     async _init() {
