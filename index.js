@@ -15,7 +15,7 @@ class Identities {
         this._createIdentityFn = createIdentityFn;
         this._createIdentityError = createIdentityError;
 
-        this._createIdentity = dedup(Identities.prototype._createIdentity.bind(this), {key: (logger, options) => options});
+        this._createIdentity = dedup(Identities.prototype._createIdentity.bind(this), {key: null});
         this._syncStoreForce = dedup(Identities.prototype._syncStoreForce.bind(this), {queue: 1});
     }
 
@@ -35,11 +35,6 @@ class Identities {
 
     _load({options = {}, identities = {}} = {}, {unlock = false} = {}) {
         const minIntervalBetweenStoreUpdate = get(this._options, 'minIntervalBetweenStoreUpdate');
-        // {
-        //     maxDeprecationsBeforeRemoval = 1, minIntervalBetweenUse = 0, recentlyUsedFirst = true,
-        //     minIntervalBetweenStoreUpdate = 10, lockExpire = 10 * 60, maxRetryCreateIdentities = -1, allowNoIdentity = true,
-        //     waitForStoreUpdateWhenNoIdentity = false,
-        // } = options;
         this._options = this._makeOptions(options);
         if (minIntervalBetweenStoreUpdate !== this._options.minIntervalBetweenStoreUpdate) {
             this._syncStoreForce = dedup(
@@ -65,9 +60,7 @@ class Identities {
         logger = logger || this.logger;
         let identity = undefined, created = true;
         while (!identity && created) {
-            let hasNoIdentity = true;
             for (const i of this._iterIdentities()) {
-                hasNoIdentity = false;
                 if (!this._isAvailable(i)) continue;
                 if (!identity) {
                     identity = i;
@@ -84,9 +77,7 @@ class Identities {
                 }
             }
             if (!identity) {
-                created = await this._createIdentity(
-                    logger, {waitForStore: hasNoIdentity && this._options.waitForStoreUpdateWhenNoIdentity}
-                );
+                created = await this._createIdentity(logger);
             }
         }
         if (identity) {
@@ -99,7 +90,7 @@ class Identities {
         }
     }
     
-    async _createIdentity(logger, {waitForStore} = {}) {
+    async _createIdentity(logger) {
         logger = logger || this.logger;
         let created = undefined;
         let trial = 0;
@@ -113,67 +104,80 @@ class Identities {
                 } catch (e) {
                     error = e;
                 }
-            } else if (waitForStore && this._stored) {
-                const store = await this.logger.pull({
-                    waitUntil: s => {
-                        const identities = get(s, [this.name, 'identities']);
-                        return !isEmpty(identities);
-                    },
-                    message: `waiting for a valid identity in store field ${this.name}`
-                }, logger);
-                this._load(store[this.name]);
-                return true;
             }
             const logEvent = error ? 'Creating identity failed' : !created ? 'No identity is created' : '';
             let logReason = !this._createIdentityFn ? [': No createIdentityFn is provided.'] : ['.'];
-            let isRetryableError = false;
             if (error) {
-                if (this._createIdentityError) {
-                    const message = await this._createIdentityError.call(logger, error);
+                let isRetryableError = false;
+                if (error instanceof Error && error.name === 'JobRuntime') {
+                    logReason = [': ', error];
+                    isRetryableError = true;
+                } else if (this._createIdentityError) {
+                    let message = undefined;
+                    try {
+                        message = await this._createIdentityError.call(logger, error);
+                    } catch (ee) {
+                        logger.warn('Another error occurred in createIdentityError(): ', ee);
+                    }
                     if (message) {
                         logReason = [': ', ...(Array.isArray(message) ? message : [message])];
                         isRetryableError = true;
                     }
                 }
+                if (!isRetryableError) {
+                    throw error;
+                }
+            } else if (created) {
+                const added = this._add(created);
+                this._info(logger, 'New identity is created: ', added.id, ' ', added.data);
+                return true;
             }
-            if (!created || isRetryableError) {
-                if (!this._createIdentityFn || !(this._options.maxRetryCreateIdentities >= 0)) {
-                    if (this._options.allowNoIdentity) {
-                        this._warn(logger, logEvent, ', no identity would be used', ...logReason);
-                        return false;
-                    } else {
-                        this._fail(logger, 'identities_create_error', logEvent, ...logReason);
-                    }
-                } else if (trial <= this._options.maxRetryCreateIdentities) {
+            if (this._options.maxRetryCreateIdentities >= 0 && trial <= this._options.maxRetryCreateIdentities && this._createIdentityFn) {
+                this._warn(
+                    logger, logEvent, ', will re-try (', trial, '/',
+                    this._options.maxRetryCreateIdentities, ')', ...logReason
+                );
+            } else {
+                if (this._options.allowNoIdentity) {
                     this._warn(
-                        logger, logEvent, ', will re-try (', trial, '/',
-                        this._options.maxRetryCreateIdentities, ')', ...logReason
+                        logger, logEvent,
+                        ...(this._options.maxRetryCreateIdentities >= 0 && this._createIdentityFn ? [
+                            ' and too many retries have been performed (',
+                            this._options.maxRetryCreateIdentities, '/', this._options.maxRetryCreateIdentities, ')'
+                        ] : []),
+                        ', no identity would be used', ...logReason
                     );
-                    continue;
+                    return false;
                 } else {
-                    if (this._options.allowNoIdentity) {
-                        this._warn(
-                            logger, logEvent, ' and too many retries have been performed (',
-                            this._options.maxRetryCreateIdentities, '/', this._options.maxRetryCreateIdentities,
-                            ')', ...logReason
+                    if (!isEmpty(this._identities) && this._options.pollingIntervalWaitingForAvailable > 0) {
+                        this._info(
+                            logger, 'Sleep ', this._options.pollingIntervalWaitingForAvailable,
+                            ' seconds to wait for existing identities to become available.'
                         );
-                        return false;
+                        await logger.sleep(this._options.pollingIntervalWaitingForAvailable);
+                        return true;
+                    } else if (isEmpty(this._identities) && this._stored && this._options.waitForStoreUpdateWhenNoIdentity) {
+                        const store = await this.logger.pull({
+                            waitUntil: s => {
+                                const identities = get(s, [this.name, 'identities']);
+                                return !isEmpty(identities);
+                            },
+                            message: `waiting for a valid identity in store field ${this.name}`
+                        }, logger);
+                        this._load(store[this.name]);
+                        return true;
                     } else {
                         this._fail(
-                            logger, 'identities_create_error',
-                            logEvent, ' and too many retries have been performed (',
-                            this._options.maxRetryCreateIdentities, '/', this._options.maxRetryCreateIdentities,
-                            ')', ...logReason
+                            logger, 'identities_create_error', logEvent,
+                            ...(this._options.maxRetryCreateIdentities >= 0 && this._createIdentityFn ? [
+                                ' and too many retries have been performed (',
+                                this._options.maxRetryCreateIdentities, '/', this._options.maxRetryCreateIdentities, ')'
+                            ] : []),
+                            ...logReason
                         );
                     }
                 }
             }
-            if (error) {
-                throw error;
-            }
-            const added = this._add(created);
-            this._info(logger, 'New identity is created: ', added.id, ' ', added.data);
-            return true;
         }
     }
 
@@ -294,7 +298,7 @@ class Identities {
         return {
             maxDeprecationsBeforeRemoval: 1, minIntervalBetweenUse: 0, minIntervalBetweenStoreUpdate: 10,
             recentlyUsedFirst: true, lockExpire: 10 * 60, maxRetryCreateIdentities: -1, allowNoIdentity: true,
-            waitForStoreUpdateWhenNoIdentity: false,
+            waitForStoreUpdateWhenNoIdentity: false, pollingIntervalWaitingForAvailable: 1,
             ...options,
         };
     }
