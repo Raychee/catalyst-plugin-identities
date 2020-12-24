@@ -1,4 +1,4 @@
-const {get, isEmpty} = require('lodash');
+const {get, isEmpty, isPlainObject} = require('lodash');
 const {v4: uuid4} = require('uuid');
 
 const {dedup} = require('@raychee/utils');
@@ -24,7 +24,7 @@ class Identities {
             store = get(await this.logger.pull(), this.name);
             if (!store) {
                 this.logger.crash(
-                    'identities_invalid_name', 'invalid identities name: ', this.name, ', please make sure: ',
+                    'plugin_identities_invalid_name', 'invalid identities name: ', this.name, ', please make sure: ',
                     '1. there is a document in the internal collection service.Store that matches filter {plugin: \'identities\'}, ',
                     '2. there is a valid entry under document field \'data.', this.name, '\''
                 );
@@ -49,11 +49,27 @@ class Identities {
             this._add(identity);
         }
     }
+    
+    _makeOptions(options) {
+        return {
+            maxDeprecationsBeforeRemoval: 1, minIntervalBetweenUse: 0, minIntervalBetweenStoreUpdate: 10,
+            recentlyUsedFirst: true, lockExpire: 10 * 60, maxRetryCreateIdentities: -1, allowNoIdentity: false,
+            waitForStoreUpdateWhenNoIdentity: false, pollingIntervalWaitingForAvailable: 1,
+            // proxiesOptions: {
+            //     identityLocationPreferred: false, identityLocationConstrained: false,
+            // },
+            ...options,
+        };
+    }
 
     _add({id = uuid4(), data, deprecated = 0, lastTimeUsed = new Date(0), locked = false}) {
         const identity = {data, deprecated, lastTimeUsed, locked};
         this._identities[id] = {...identity, ...this._identities[id]};
         return {id, ...identity};
+    }
+    
+    getProxiesOptions() {
+        return this._options.proxiesOptions || {};
     }
 
     async get(logger, {lock = false} = {}) {
@@ -81,10 +97,10 @@ class Identities {
             }
         }
         if (identity) {
-            this.touch(logger, identity);
+            identity = this.touch(logger, identity);
             this._info(logger, identity.id, ' is being used.');
             if (lock) {
-                this.lock(logger, identity);
+                identity = this.lock(logger, identity);
             }
             return identity;
         }
@@ -104,6 +120,12 @@ class Identities {
                 } catch (e) {
                     error = e;
                 }
+            }
+            if (created && (!isPlainObject(created) || !created.data)) {
+                this._warn(
+                    logger, 'New identity is not valid. Expect a plain object with key "data", got ', created
+                );
+                created = undefined;
             }
             const logEvent = error ? 'Creating identity failed' : !created ? 'No identity is created' : '';
             let logReason = !this._createIdentityFn ? [': No createIdentityFn is provided.'] : ['.'];
@@ -168,7 +190,7 @@ class Identities {
                         return true;
                     } else {
                         this._fail(
-                            logger, 'identities_create_error', logEvent,
+                            logger, 'plugin_identities_create_error', logEvent,
                             ...(this._options.maxRetryCreateIdentities >= 0 && this._createIdentityFn ? [
                                 ' and too many retries have been performed (',
                                 this._options.maxRetryCreateIdentities, '/', this._options.maxRetryCreateIdentities, ')'
@@ -186,6 +208,7 @@ class Identities {
         if (!identity) return;
         this._info(logger, id, ' is locked.');
         identity.locked = new Date();
+        return {id, ...identity};
     }
 
     unlock(logger, one) {
@@ -196,20 +219,23 @@ class Identities {
             identity.locked = null;
             this.touch(logger, id);
         }
+        return {id, ...identity};
     }
 
     touch(_, one) {
-        const {identity} = this._find(one);
+        const {id, identity} = this._find(one);
         if (!identity) return;
         identity.lastTimeUsed = new Date();
         this._syncStore();
+        return {id, ...identity};
     }
 
     update(_, one, data) {
-        const {identity} = this._find(one);
+        const {id, identity} = this._find(one);
         if (!identity) return;
         identity.data = data;
         this._syncStore();
+        return {id, ...identity};
     }
 
     renew(logger, one) {
@@ -220,6 +246,7 @@ class Identities {
             identity.deprecated = 0;
             this._syncStore();
         }
+        return {id, ...identity};
     }
 
     deprecate(logger, one) {
@@ -228,13 +255,15 @@ class Identities {
         identity.deprecated = (identity.deprecated || 0) + 1;
         this._info(
             logger, id, ' is deprecated (', identity.deprecated, '/',
-            this._options.maxDeprecationsBeforeRemoval, ').'
+            this._options.maxDeprecationsBeforeRemoval >= 0 ? this._options.maxDeprecationsBeforeRemoval : '∞', 
+            ').'
         );
-        if (identity.deprecated >= this._options.maxDeprecationsBeforeRemoval) {
+        if (this._options.maxDeprecationsBeforeRemoval >= 0 && identity.deprecated >= this._options.maxDeprecationsBeforeRemoval) {
             this.remove(logger, id);
         }
         this.unlock(logger, id);
         this._syncStore();
+        return {id, ...identity};
     }
 
     remove(logger, one) {
@@ -243,6 +272,7 @@ class Identities {
         this._identities[id] = null;
         this._info(logger, id, ' is removed: ', identity);
         this._syncStore();
+        return {id, ...identity};
     }
 
     *_iterIdentities(identities) {
@@ -251,14 +281,13 @@ class Identities {
             yield {id, ...identity};
         }
     }
-
-    _id(one) {
-        return typeof one === "string" ? one : one.id;
-    }
-
+    
     _find(one) {
-        const id = this._id(one);
-        return {id, identity: this._identities[id]};
+        if (typeof one === "string") {
+            return {id: one, identity: this._identities[one]};
+        } else {
+            return {id: one.id, identity: this._identities[one.id] || {...one}};
+        }
     }
 
     _syncStore() {
@@ -292,15 +321,6 @@ class Identities {
         const now = Date.now();
         return (!identity.locked || identity.locked < now - this._options.lockExpire * 1000) &&
             identity.lastTimeUsed <= now - this._options.minIntervalBetweenUse * 1000;
-    }
-
-    _makeOptions(options) {
-        return {
-            maxDeprecationsBeforeRemoval: 1, minIntervalBetweenUse: 0, minIntervalBetweenStoreUpdate: 10,
-            recentlyUsedFirst: true, lockExpire: 10 * 60, maxRetryCreateIdentities: -1, allowNoIdentity: true,
-            waitForStoreUpdateWhenNoIdentity: false, pollingIntervalWaitingForAvailable: 1,
-            ...options,
-        };
     }
     
     _logPrefix() {
