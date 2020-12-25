@@ -62,10 +62,11 @@ class Identities {
         };
     }
 
-    _add({id = uuid4(), data, deprecated = 0, lastTimeUsed = new Date(0), locked = false}) {
-        const identity = {data, deprecated, lastTimeUsed, locked};
-        this._identities[id] = {...identity, ...this._identities[id]};
-        return {id, ...identity};
+    _add(identity) {
+        identity = {id: uuid4(), deprecated: 0, lastTimeUsed: new Date(), locked: false, ...identity};
+        const added = {...identity, ...this._identities[identity.id]};
+        this._identities[identity.id] = added;
+        return added;
     }
     
     getProxiesOptions() {
