@@ -63,7 +63,7 @@ class Identities {
     }
 
     _add(identity) {
-        identity = {id: uuid4(), deprecated: 0, lastTimeUsed: new Date(), locked: false, ...identity};
+        identity = {id: uuid4(), deprecated: 0, lastTimeUsed: new Date(0), locked: false, ...identity};
         const added = {...identity, ...this._identities[identity.id]};
         this._identities[identity.id] = added;
         return added;
@@ -81,15 +81,16 @@ class Identities {
                 if (!this._isAvailable(i)) continue;
                 if (!identity) {
                     identity = i;
-                } else {
+                } else if (i.deprecated > identity.deprecated) {
+                } else if (i.deprecated < identity.deprecated) {
+                    identity = i;
+                } else if (i.lastTimeUsed > identity.lastTimeUsed) {
                     if (this._options.recentlyUsedFirst) {
-                        if (i.lastTimeUsed > identity.lastTimeUsed) {
-                            identity = i;
-                        }
-                    } else {
-                        if (i.lastTimeUsed < identity.lastTimeUsed) {
-                            identity = i;
-                        }
+                        identity = i;
+                    }
+                } else if (i.lastTimeUsed < identity.lastTimeUsed) {
+                    if (!this._options.recentlyUsedFirst) {
+                        identity = i;
                     }
                 }
             }
@@ -218,9 +219,10 @@ class Identities {
         if (identity.locked) {
             this._info(logger, id, ' is unlocked.');
             identity.locked = null;
-            this.touch(logger, id);
+            return this.touch(logger, id);
+        } else {
+            return {id, ...identity};
         }
-        return {id, ...identity};
     }
 
     touch(_, one) {
@@ -260,11 +262,11 @@ class Identities {
             ').'
         );
         if (this._options.maxDeprecationsBeforeRemoval >= 0 && identity.deprecated >= this._options.maxDeprecationsBeforeRemoval) {
-            this.remove(logger, id);
+            return this.remove(logger, id);
         }
-        this.unlock(logger, id);
+        const unlocked = this.unlock(logger, id);
         this._syncStore();
-        return {id, ...identity};
+        return unlocked;
     }
 
     remove(logger, one) {
@@ -273,7 +275,7 @@ class Identities {
         this._identities[id] = null;
         this._info(logger, id, ' is removed: ', identity);
         this._syncStore();
-        return {id, ...identity};
+        return {id, ...identity, removed: true};
     }
 
     *_iterIdentities(identities) {
